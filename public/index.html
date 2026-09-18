@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MEGH ULTRA XD — Pairing</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Orbitron:wght@500;700;900&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <div class="scanline"></div>
+
+  <main class="card">
+    <div class="card-inner">
+      <header class="head">
+        <div class="logo">
+          <span class="logo-glow">◈</span>
+          <h1 class="logo-text">MEGH<span class="accent">·</span>ULTRA<span class="accent">·</span>XD</h1>
+        </div>
+        <p class="sub">Official WhatsApp Bot Pairing</p>
+        <div class="status-bar">
+          <span class="dot live"></span>
+          <span>SYSTEM ONLINE</span>
+          <span class="divider">|</span>
+          <span id="clock">--:--:--</span>
+        </div>
+      </header>
+
+      <!-- Step 1: Phone input -->
+      <section id="step-phone" class="step active">
+        <label class="field-label">
+          <span class="label-text">// Enter WhatsApp Number</span>
+          <div class="phone-wrap">
+            <span class="prefix">+</span>
+            <input
+              type="tel"
+              id="phone"
+              placeholder="254712345678"
+              inputmode="numeric"
+              autocomplete="off"
+              spellcheck="false"
+            />
+          </div>
+          <small class="hint">With country code, no +, no spaces. e.g. 254712345678</small>
+        </label>
+
+        <button id="btn-pair" class="btn-primary">
+          <span class="btn-text">Generate Pairing Code</span>
+          <span class="btn-arrow">→</span>
+        </button>
+
+        <div class="features">
+          <div class="feat"><span class="ic">⚡</span><span>No QR Code</span></div>
+          <div class="feat"><span class="ic">🔐</span><span>End-to-End</span></div>
+          <div class="feat"><span class="ic">💎</span><span>Premium UI</span></div>
+          <div class="feat"><span class="ic">🚀</span><span>Official Baileys</span></div>
+        </div>
+      </section>
+
+      <!-- Step 2: Pairing code -->
+      <section id="step-code" class="step">
+        <p class="step-title">⟶ Your Pairing Code</p>
+        <div class="pairing-code" id="pairing-code">
+          <span class="char">●</span><span class="char">●</span><span class="char">●</span><span class="char">●</span>
+          <span class="sep">-</span>
+          <span class="char">●</span><span class="char">●</span><span class="char">●</span><span class="char">●</span>
+        </div>
+        <p class="hint-center">
+          Open WhatsApp → <b>Settings</b> → <b>Linked Devices</b> →<br/>
+          <b>Link with phone number</b> → enter the code above
+        </p>
+        <div class="loader">
+          <div class="loader-bar"></div>
+          <span class="loader-text">Waiting for link confirmation…</span>
+        </div>
+      </section>
+
+      <!-- Step 3: Session ID -->
+      <section id="step-session" class="step">
+        <p class="step-title">⟶ Session Linked</p>
+        <div class="success-icon">✓</div>
+        <p class="hint-center">Your session ID is ready.</p>
+        <div class="session-id-wrap">
+          <code id="session-id" class="session-id">megh-ultra:~…</code>
+          <button id="btn-copy" class="btn-copy" title="Copy">⧉</button>
+        </div>
+        <p class="hint-center small">
+          🟢 Paste this as <code>SESSION_ID</code> during Pterodactyl deploy<br/>
+          🟢 Support: <a href="https://wa.me/message/25495314221" target="_blank">wa.me/message/25495314221</a>
+        </p>
+        <button id="btn-restart" class="btn-secondary">Pair Another Number</button>
+      </section>
+
+      <!-- Error -->
+      <div id="error-banner" class="error-banner"></div>
+
+      <footer class="foot">
+        <span>© 2025 MEGH ULTRA XD</span>
+        <span class="ver">v1.8.4</span>
+      </footer>
+    </div>
+  </main>
+
+  <script src="/script.js"></script>
+</body>
+</html>
