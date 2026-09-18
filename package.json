@@ -1,9 +1,9 @@
 {
   "name": "megh-ultra-pairing-site",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Premium WhatsApp pairing site for MEGH ULTRA XD bot — generates pairing codes (no QR) using official Baileys",
   "main": "server.js",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"
