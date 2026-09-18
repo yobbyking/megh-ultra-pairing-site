@@ -4,12 +4,15 @@ services:
     runtime: node
     plan: free
     region: oregon
+    nodeVersion: 20.18.1
     buildCommand: npm install
     startCommand: node server.js
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_OPTIONS
+        value: --max-old-space-size=512
     disk:
       name: data
       mountPath: /opt/render/project/src/data
