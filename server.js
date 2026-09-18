@@ -14,8 +14,7 @@ import { fileURLToPath } from 'url';
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
-  makeCacheableSignalStore
+  fetchLatestBaileysVersion
 } from '@whiskeysockets/baileys';
 import P from 'pino';
 import Database from 'better-sqlite3';
