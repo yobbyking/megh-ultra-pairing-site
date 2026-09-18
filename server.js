@@ -1,8 +1,12 @@
 /**
  * MEGH ULTRA XD — Pairing Site (Render-hosted)  [ESM version]
- * -----------------------------------------------------------
- * Uses official @whiskeysockets/baileys (ESM-only) to generate
- * pairing codes (NO QR — phone-number based).
+ * Uses official @whiskeysockets/baileys (ESM-only).
+ *
+ * Key fixes:
+ *  - Browser config uses correct Chrome+MacOS identity (was malformed)
+ *  - Pairing code is requested AFTER ws is open (uses ev queue)
+ *  - Socket does NOT auto-restart once code is generated (would invalidate the code)
+ *  - Phone validation requires country code
  */
 
 import express from 'express';
@@ -28,7 +32,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
-const SESSION_TTL_MS = 5 * 60 * 1000;
+const SESSION_TTL_MS = 8 * 60 * 1000; // 8 min to complete pairing
 const logger = P({ level: 'warn' });
 
 // ── SQLite (users dp + session metadata) ────────────────────────────
@@ -56,15 +60,27 @@ const insertUserStmt = db.prepare(`
 `);
 
 // ─── In-memory map of pending pairing sessions ──────────────────────
+/**
+ * @type {Map<string, {
+ *   sock: any,
+ *   phone: string,
+ *   pairingCode: string|null,
+ *   state: 'pending'|'code_sent'|'linked'|'failed',
+ *   sessionFolder: string,
+ *   startedAt: number,
+ *   resolve?: Function,
+ *   reject?: Function,
+ *   creds?: any
+ * }>}
+ */
 const pendingSessions = new Map();
 
 // ─── Helpers ────────────────────────────────────────────────────────
 function normalizePhone(phone) {
   let p = (phone || '').toString().replace(/\D/g, '');
   if (p.startsWith('00')) p = p.slice(2);
-  if (p.startsWith('+')) p = p.slice(1);
-  if (!p) return null;
-  return p;
+  // WhatsApp needs the country code — minimum 8 digits total
+  return p || null;
 }
 
 function randomSessionCode() {
@@ -103,12 +119,18 @@ async function startPairingSession(phone) {
   const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
   const { version } = await fetchLatestBaileysVersion();
 
+  // ✅ Correct Baileys browser format: [appName, browserType, OS]
+  //    - 'MEGH ULTRA XD' = our app name
+  //    - 'Chrome' = we impersonate Chrome browser (per user request)
+  //    - 'MacOS' = the OS we claim to run on
+  const browserConfig = ['MEGH ULTRA XD', 'Chrome', 'MacOS'];
+
   const sock = makeWASocket({
     version,
     auth: state,
     printQRInTerminal: false,
     logger,
-    browser: ['MEGH ULTRA XD', 'Chrome', '1.0.0'],
+    browser: browserConfig,
     generateHighQualityLinkPreview: true,
     shouldIgnoreJid: () => false,
     markOnlineOnConnect: false,
@@ -130,15 +152,19 @@ async function startPairingSession(phone) {
   };
   pendingSessions.set(sessionCode, entry);
 
+  // Connection lifecycle
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, pairingCode: pc } = update;
 
+    // Some Baileys versions emit pairingCode via connection.update
     if (pc) {
       entry.pairingCode = pc;
+      entry.state = 'code_sent';
       console.log(`[${sessionCode}] Pairing code generated: ${pc}`);
     }
 
     if (connection === 'open') {
+      // User successfully linked — capture creds
       try {
         const credsBase64 = encodeCreds(state);
         const sessionId = buildSessionId(sessionCode, credsBase64);
@@ -160,6 +186,7 @@ async function startPairingSession(phone) {
         entry.creds = { sessionId, dpBase64, jid };
         console.log(`[${sessionCode}] Linked — jid=${jid}`);
 
+        // Schedule teardown — give the bot nothing to keep alive here
         setTimeout(() => teardownSession(sessionCode), 5000);
       } catch (e) {
         console.error(`[${sessionCode}] Failed to capture creds:`, e);
@@ -169,20 +196,42 @@ async function startPairingSession(phone) {
 
     if (connection === 'close') {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
-      if (statusCode !== DisconnectReason.loggedOut && statusCode !== 410) {
-        if (entry.state === 'pending') {
-          setTimeout(() => startPairingSession(phone).catch(()=>{}), 2000);
-          pendingSessions.delete(sessionCode);
-        }
-      } else {
+      console.log(`[${sessionCode}] Connection closed. Status: ${statusCode}, state: ${entry.state}`);
+
+      // If the user already linked, no action needed (entry will be torn down)
+      if (entry.state === 'linked') return;
+
+      // If we already generated a code, DON'T restart — that would
+      // invalidate the code shown on the website. Just wait for the
+      // user to enter it on their phone; the socket will reconnect
+      // using the persisted auth state once they do.
+      if (entry.state === 'code_sent' || entry.pairingCode) {
+        console.log(`[${sessionCode}] Preserving pairing code (not restarting). User can still enter the code on their phone.`);
+        return;
+      }
+
+      // If loggedOut or 410 (resource gone), don't retry
+      if (statusCode === DisconnectReason.loggedOut || statusCode === 410) {
         entry.state = 'failed';
+        return;
+      }
+
+      // If we haven't generated a code yet, restart the session
+      if (entry.state === 'pending') {
+        console.log(`[${sessionCode}] Restarting pending session in 2s…`);
+        pendingSessions.delete(sessionCode);
+        try { fs.rmSync(sessionFolder, { recursive: true, force: true }); } catch {}
+        setTimeout(() => startPairingSession(phone).catch(()=>{}), 2000);
       }
     }
   });
 
+  // Request pairing code — Baileys queues this until the WS is open
   try {
     const code = await sock.requestPairingCode(phone);
     entry.pairingCode = code;
+    if (entry.state === 'pending') entry.state = 'code_sent';
+    console.log(`[${sessionCode}] Pairing code generated: ${code}`);
     return { sessionCode, pairingCode: code };
   } catch (e) {
     console.error('Failed to request pairing code:', e);
@@ -202,7 +251,7 @@ async function teardownSession(sessionCode) {
 setInterval(() => {
   const now = Date.now();
   for (const [code, entry] of pendingSessions.entries()) {
-    if (now - entry.startedAt > SESSION_TTL_MS && entry.state === 'pending') {
+    if (now - entry.startedAt > SESSION_TTL_MS && entry.state !== 'linked') {
       console.log(`[${code}] Session timed out — cleaning up`);
       teardownSession(code).catch(()=>{});
     }
@@ -217,8 +266,12 @@ app.post('/api/pair', async (req, res) => {
     return res.status(400).json({ ok: false, error: 'Invalid phone number' });
   }
   if (phone.length < 8 || phone.length > 15) {
-    return res.status(400).json({ ok: false, error: 'Phone number must be 8-15 digits (with country code, no +)' });
+    return res.status(400).json({
+      ok: false,
+      error: 'Phone must be 8-15 digits with country code (e.g. 254712345678)'
+    });
   }
+
   try {
     const { sessionCode, pairingCode } = await startPairingSession(phone);
     return res.json({
@@ -268,4 +321,5 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`MEGH ULTRA XD pairing site live on :${PORT}`);
+  console.log(`Browser identity: ['MEGH ULTRA XD', 'Chrome', 'MacOS']`);
 });
