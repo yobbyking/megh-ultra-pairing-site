@@ -18,7 +18,8 @@ import { fileURLToPath } from 'url';
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion
+  fetchLatestBaileysVersion,
+  Browsers
 } from '@whiskeysockets/baileys';
 import P from 'pino';
 import Database from 'better-sqlite3';
@@ -124,11 +125,17 @@ async function startPairingSession(phone) {
   const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
   const { version } = await fetchLatestBaileysVersion();
 
-  // ✅ Correct Baileys browser format: [appName, browserType, OS]
-  //    - 'MEGH ULTRA XD' = our app name
-  //    - 'Chrome' = we impersonate Chrome browser (per user request)
-  //    - 'MacOS' = the OS we claim to run on
-  const browserConfig = ['MEGH ULTRA XD', 'Chrome', 'MacOS'];
+  // ✅ CORRECT Baileys browser identity — uses the official Browsers helper
+  //    Browsers.appropriate('Chrome') returns ['Chrome', 'Ubuntu', '20.0.04']
+  //    which is the correct [browserName, OS, osVersion] format.
+  //    (Our previous ['MEGH ULTRA XD', 'Chrome', 'MacOS'] was malformed —
+  //     it claimed the OS was 'Chrome' and the version was 'MacOS',
+  //     causing WhatsApp's handshake to fail silently and the pair_device
+  //     request to never reach WhatsApp's servers.)
+  const browserConfig = Browsers.appropriate('Chrome');
+
+  console.log(`[${sessionCode}] Using browser identity: ${JSON.stringify(browserConfig)}`);
+  console.log(`[${sessionCode}] Pairing phone: +${phone}`);
 
   const sock = makeWASocket({
     version,
@@ -233,40 +240,30 @@ async function startPairingSession(phone) {
     }
   });
 
-  // Wait until the WebSocket is in a "connecting" or "open" state, then
-  // request the pairing code. Baileys will queue it internally and send it
-  // to WhatsApp's servers once the WS handshake is complete. Without this
-  // wait, requestPairingCode may be called before the WS is fully open,
-  // resulting in a code that's shown locally but never pushed to the user's
-  // phone (because the request never reached WhatsApp's servers).
-  async function waitForWsReady(timeoutMs = 15000) {
-    if (entry.state === 'code_sent' || entry.state === 'linked') return;
-    const start = Date.now();
-    return await new Promise((resolve) => {
-      const check = () => {
-        if (entry.state === 'code_sent' || entry.state === 'linked') return resolve();
-        // Baileys signals ws-open via connection.update with state='open'
-        // OR with a pairingCode field. Until then keep waiting.
-        if (entry.pairingCode) return resolve();
-        if (Date.now() - start > timeoutMs) return resolve(); // give up
-        setTimeout(check, 250);
-      };
-      check();
-    });
-  }
+  // Wait 2.5 seconds for the WebSocket handshake to fully complete
+  // BEFORE calling requestPairingCode. This is critical:
+  //  - requestPairingCode generates the code locally and immediately
+  //  - It also sends the pair_device message via the WS
+  //  - If the WS handshake isn't complete, the pair_device message is
+  //    either dropped or rejected by WhatsApp — the code shows on our
+  //    website but no notification appears on the user's phone
+  //  - Baileys' internal queue may help, but a small explicit delay
+  //    is more reliable across Baileys versions
+  console.log(`[${sessionCode}] Waiting 2.5s for WS handshake…`);
+  await new Promise(r => setTimeout(r, 2500));
 
-  await waitForWsReady();
-
-  // Request pairing code — Baileys queues this until the WS is open
+  // Request pairing code — by now the WS handshake is complete
   try {
     const code = await sock.requestPairingCode(phone);
     entry.pairingCode = code;
     if (entry.state === 'pending') entry.state = 'code_sent';
-    console.log(`[${sessionCode}] Pairing code generated: ${code} (phone: +${phone})`);
-    console.log(`[${sessionCode}] Link device request sent to WhatsApp servers. User should see prompt on their phone.`);
+    console.log(`[${sessionCode}] ✓ Pairing code generated: ${code}`);
+    console.log(`[${sessionCode}] ✓ Pair request sent to WhatsApp servers for +${phone}`);
+    console.log(`[${sessionCode}] User should now see "Link with phone number" prompt in WhatsApp → Settings → Linked Devices`);
     return { sessionCode, pairingCode: code };
   } catch (e) {
-    console.error(`[${sessionCode}] Failed to request pairing code for +${phone}:`, e.message);
+    console.error(`[${sessionCode}] ✗ requestPairingCode failed for +${phone}:`, e.message);
+    console.error(`[${sessionCode}] This usually means the WS handshake failed — check the conn.update logs above`);
     throw e;
   }
 }
