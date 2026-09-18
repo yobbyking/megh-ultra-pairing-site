@@ -205,22 +205,65 @@ async function startPairingSession(phone) {
     }
 
     if (connection === 'open') {
-      console.log(`[${sessionCode}] 🟢 Connection OPEN — waiting 3s for creds to fully save…`);
-      await new Promise(r => setTimeout(r, 3000));
-      console.log(`[${sessionCode}] Capturing creds now…`);
+      console.log(`[${sessionCode}] 🟢 Connection OPEN — sending WhatsApp messages to user's phone…`);
+
+      // Wait briefly for socket + creds to settle
+      await new Promise(r => setTimeout(r, 1500));
+
       try {
+        const jid = sock.user?.id;
+        const userName = sock.user?.name || sock.user?.verifiedName || 'Owner';
+        console.log(`[${sessionCode}] User: ${jid} (${userName})`);
+
+        // ─────────────────────────────────────────────────────────────
+        // MESSAGE 1: "Generation session....."
+        // ─────────────────────────────────────────────────────────────
+        try {
+          await sock.sendMessage(jid, { text: 'Generation session.....' });
+          console.log(`[${sessionCode}] ✓ Sent message 1: "Generation session....."`);
+        } catch (e) {
+          console.warn(`[${sessionCode}] Failed to send msg 1:`, e.message);
+        }
+
+        // Small delay so the user can read it
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Build the session ID now
         const credsBase64 = encodeCreds(state);
         const sessionId = buildSessionId(sessionCode, credsBase64);
-        const jid = sock.user?.id || state.creds?.me?.id;
-        console.log(`[${sessionCode}] ✓ jid=${jid}, creds size=${credsBase64.length} chars`);
+        console.log(`[${sessionCode}] ✓ Built session ID (size=${credsBase64.length} chars)`);
 
+        // ─────────────────────────────────────────────────────────────
+        // MESSAGE 2: just the session ID itself
+        // e.g. megh-ultra:~3MWb2cme0eXWQlxR
+        // ─────────────────────────────────────────────────────────────
+        try {
+          await sock.sendMessage(jid, { text: sessionId });
+          console.log(`[${sessionCode}] ✓ Sent message 2 (session ID)`);
+        } catch (e) {
+          console.warn(`[${sessionCode}] Failed to send msg 2:`, e.message);
+        }
+
+        // Another small delay
+        await new Promise(r => setTimeout(r, 1000));
+
+        // ─────────────────────────────────────────────────────────────
+        // MESSAGE 3: "🟢 Session Linked" + deploy instructions + support
+        // ─────────────────────────────────────────────────────────────
+        const msg3 = `🟢 Session Linked\n\n🟢 Paste it as SESSION_ID during deploy or use auto enter on panel.\n🟢 Support: https://wa.me/message/25495314221`;
+        try {
+          await sock.sendMessage(jid, { text: msg3 });
+          console.log(`[${sessionCode}] ✓ Sent message 3 (Session Linked)`);
+        } catch (e) {
+          console.warn(`[${sessionCode}] Failed to send msg 3:`, e.message);
+        }
+
+        // Save to DB so the website can still show the session ID
         const dpBase64 = jid ? await downloadDpBase64(sock, jid) : null;
-        console.log(`[${sessionCode}] DP fetch: ${dpBase64 ? '✓ got' : 'null (no DP)'}`);
-
         insertUserStmt.run({
           phone,
           jid: jid || null,
-          name: null,
+          name: userName,
           dp_base64: dpBase64,
           session_code: sessionCode,
           session_id: sessionId,
@@ -229,14 +272,15 @@ async function startPairingSession(phone) {
         });
 
         entry.state = 'linked';
-        entry.creds = { sessionId, dpBase64, jid };
-        console.log(`[${sessionCode}] ✓✓ Linked — session ID ready`);
-        console.log(`[${sessionCode}] User can copy the session ID from the website now`);
+        entry.creds = { sessionId, dpBase64, jid, userName };
+        console.log(`[${sessionCode}] ✓✓ Linked — session ID sent to user's WhatsApp`);
+        console.log(`[${sessionCode}] Socket going offline now — bot will activate when deployed on Pterodactyl`);
 
-        // Keep socket alive for 30s so WhatsApp's "Logging in..." completes
-        setTimeout(() => teardownSession(sessionCode), 30000);
+        // Disconnect after a short delay so the messages are delivered
+        // (matches the user's spec: "once it has done all bot goes offline")
+        setTimeout(() => teardownSession(sessionCode), 5000);
       } catch (e) {
-        console.error(`[${sessionCode}] ✗ Failed to capture creds:`, e);
+        console.error(`[${sessionCode}] ✗ Failed to send WhatsApp messages:`, e);
         entry.state = 'failed';
       }
     }
