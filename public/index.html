@@ -11,7 +11,6 @@
 </head>
 <body>
   <canvas id="bg"></canvas>
-
   <div class="scanline"></div>
 
   <main class="card">
@@ -19,7 +18,7 @@
       <header class="head">
         <div class="logo">
           <span class="logo-glow">◈</span>
-          <h1 class="logo-text">MEGH<span class="accent">·</span>ULTRA<span class="accent">·</span>XD</h1>
+          <h1 class="logo-text">MEGH<span class="accent">·</span>MD</h1>
         </div>
         <p class="sub">Official WhatsApp Bot Pairing</p>
         <div class="status-bar">
@@ -35,17 +34,46 @@
         <label class="field-label">
           <span class="label-text">// Enter WhatsApp Number</span>
           <div class="phone-wrap">
+            <select id="countryCode" class="country-code">
+              <option value="254" data-flag="🇰🇪">+254 KE</option>
+              <option value="1"    data-flag="🇺🇸">+1  US</option>
+              <option value="44"   data-flag="🇬🇧">+44 UK</option>
+              <option value="234"  data-flag="🇳🇬">+234 NG</option>
+              <option value="91"   data-flag="🇮🇳">+91 IN</option>
+              <option value="27"   data-flag="🇿🇦">+27 ZA</option>
+              <option value="233"  data-flag="🇬🇭">+233 GH</option>
+              <option value="256"  data-flag="🇺🇬">+256 UG</option>
+              <option value="255"  data-flag="🇹🇿">+255 TZ</option>
+              <option value="971"  data-flag="🇦🇪">+971 AE</option>
+              <option value="966"  data-flag="🇸🇦">+966 SA</option>
+              <option value="880"  data-flag="🇧🇩">+880 BD</option>
+              <option value="92"   data-flag="🇵🇰">+92 PK</option>
+              <option value="61"   data-flag="🇦🇺">+61 AU</option>
+              <option value="49"   data-flag="🇩🇪">+49 DE</option>
+              <option value="33"   data-flag="🇫🇷">+33 FR</option>
+              <option value="34"   data-flag="🇪🇸">+34 ES</option>
+              <option value="39"   data-flag="🇮🇹">+39 IT</option>
+              <option value="7"    data-flag="🇷🇺">+7  RU</option>
+              <option value="55"   data-flag="🇧🇷">+55 BR</option>
+              <option value="52"   data-flag="🇲🇽">+52 MX</option>
+              <option value="62"   data-flag="🇮🇩">+62 ID</option>
+              <option value="63"   data-flag="🇵🇭">+63 PH</option>
+              <option value="60"   data-flag="🇲🇾">+60 MY</option>
+              <option value="65"   data-flag="🇸🇬">+65 SG</option>
+              <option value="81"   data-flag="🇯🇵">+81 JP</option>
+              <option value="82"   data-flag="🇰🇷">+82 KR</option>
+            </select>
             <span class="prefix">+</span>
             <input
               type="tel"
               id="phone"
-              placeholder="254712345678"
+              placeholder="712345678"
               inputmode="numeric"
               autocomplete="off"
               spellcheck="false"
             />
           </div>
-          <small class="hint">With country code, no +, no spaces. e.g. 254712345678</small>
+          <small class="hint" id="phoneHint">Enter your local number WITHOUT country code (e.g. 712345678). The country code above will be prepended.</small>
         </label>
 
         <button id="btn-pair" class="btn-primary">
@@ -61,14 +89,16 @@
         </div>
       </section>
 
-      <!-- Step 2: Pairing code -->
+      <!-- Step 2: Pairing code (tappable to copy) -->
       <section id="step-code" class="step">
         <p class="step-title">⟶ Your Pairing Code</p>
-        <div class="pairing-code" id="pairing-code">
+        <div class="pairing-code" id="pairingCodeBox" title="Tap to copy">
           <span class="char">●</span><span class="char">●</span><span class="char">●</span><span class="char">●</span>
           <span class="sep">-</span>
           <span class="char">●</span><span class="char">●</span><span class="char">●</span><span class="char">●</span>
         </div>
+        <p class="tap-hint">👆 Tap the code to copy</p>
+        <div class="copy-toast" id="copyToast">✓ Copied to clipboard</div>
         <p class="hint-center">
           Open WhatsApp → <b>Settings</b> → <b>Linked Devices</b> →<br/>
           <b>Link with phone number</b> → enter the code above
@@ -84,7 +114,7 @@
         <p class="step-title">⟶ Session Linked</p>
         <div class="success-icon">✓</div>
         <p class="hint-center">Your session ID is ready.</p>
-        <div class="session-id-wrap">
+        <div class="session-id-wrap" id="sessionIdBox" title="Tap to copy">
           <code id="session-id" class="session-id">megh-ultra:~…</code>
           <button id="btn-copy" class="btn-copy" title="Copy">⧉</button>
         </div>
@@ -95,11 +125,10 @@
         <button id="btn-restart" class="btn-secondary">Pair Another Number</button>
       </section>
 
-      <!-- Error -->
       <div id="error-banner" class="error-banner"></div>
 
       <footer class="foot">
-        <span>© 2025 MEGH ULTRA XD</span>
+        <span>© 2025 MEGH MD</span>
         <span class="ver">v1.8.4</span>
       </footer>
     </div>
