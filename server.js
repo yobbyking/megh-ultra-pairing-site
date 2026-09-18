@@ -33,7 +33,7 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const PORT = process.env.PORT || 3000;
-const SESSION_TTL_MS = 8 * 60 * 1000; // 8 min to complete pairing
+const SESSION_TTL_MS = 10 * 60 * 1000; // 10 min — gives user enough time to complete the link
 const logger = P({ level: 'warn' });
 
 // ── SQLite (users dp + session metadata) ────────────────────────────
@@ -106,14 +106,26 @@ function encodeCreds(state) {
 }
 
 async function downloadDpBase64(sock, jid) {
+  // Wrap in a Promise.race with a 5-second timeout so DP fetch can NEVER
+  // hang the link flow. If DP doesn't load in 5s, we just return null
+  // and the user can still get their session ID.
   try {
-    const url = await sock.profilePictureUrl(jid, 'image');
+    const url = await Promise.race([
+      sock.profilePictureUrl(jid, 'image'),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('profilePictureUrl timeout')), 5000))
+    ]);
     if (!url) return null;
-    const res = await fetch(url);
+    const res = await Promise.race([
+      fetch(url),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('fetch DP timeout')), 5000))
+    ]);
     if (!res.ok) return null;
     const buf = Buffer.from(await res.arrayBuffer());
     return buf.toString('base64');
-  } catch { return null; }
+  } catch (e) {
+    console.log(`  DP fetch skipped: ${e.message}`);
+    return null;
+  }
 }
 
 // ─── Start a temporary Baileys socket for pairing ───────────────────
@@ -150,8 +162,17 @@ async function startPairingSession(phone) {
     getMessage: async () => undefined
   });
 
-  sock.ev.on('messages.upsert', () => {});
-  sock.ev.on('creds.update', saveCreds);
+  sock.ev.on('messages.upsert', ({ messages }) => {
+    // Log incoming messages so we can see WhatsApp's link confirm
+    for (const m of messages) {
+      const t = m.message ? Object.keys(m.message)[0] : 'unknown';
+      console.log(`[${sessionCode}] 📨 msg.recv type=${t} from=${m.key?.remoteJid}`);
+    }
+  });
+  sock.ev.on('creds.update', () => {
+    console.log(`[${sessionCode}] 🔑 creds.update (saving to disk)`);
+    saveCreds();
+  });
 
   const entry = {
     sock,
@@ -178,12 +199,21 @@ async function startPairingSession(phone) {
 
     if (connection === 'open') {
       // User successfully linked — capture creds
-      console.log(`[${sessionCode}] Connection OPEN — capturing creds…`);
+      console.log(`[${sessionCode}] 🟢 Connection OPEN — waiting 3s for creds to fully save…`);
+      // Give Baileys time to fire all creds.update events and write to disk
+      // before we read state.creds. Without this wait, state.creds.me might
+      // be null and the encoded session ID would be incomplete.
+      await new Promise(r => setTimeout(r, 3000));
+      console.log(`[${sessionCode}] Capturing creds now…`);
       try {
         const credsBase64 = encodeCreds(state);
         const sessionId = buildSessionId(sessionCode, credsBase64);
-        const jid = sock.user?.id;
+        const jid = sock.user?.id || state.creds?.me?.id;
+        console.log(`[${sessionCode}] ✓ jid=${jid}, creds size=${credsBase64.length} chars`);
+
+        // DP download with 5-second timeout so it never hangs the link flow
         const dpBase64 = jid ? await downloadDpBase64(sock, jid) : null;
+        console.log(`[${sessionCode}] DP fetch: ${dpBase64 ? '✓ got' : 'null (no DP)'}`);
 
         insertUserStmt.run({
           phone,
@@ -198,12 +228,16 @@ async function startPairingSession(phone) {
 
         entry.state = 'linked';
         entry.creds = { sessionId, dpBase64, jid };
-        console.log(`[${sessionCode}] ✓ Linked — jid=${jid}`);
+        console.log(`[${sessionCode}] ✓✓ Linked — session ID ready`);
+        console.log(`[${sessionCode}] User can copy the session ID from the website now`);
 
-        // Schedule teardown — give the bot nothing to keep alive here
-        setTimeout(() => teardownSession(sessionCode), 5000);
+        // Keep the socket alive for 30s (not 5s) so WhatsApp's "Logging in…"
+        // state on the user's phone can fully complete. The link isn't done
+        // the moment connection='open' fires — WhatsApp still needs to sync
+        // device metadata, and our socket must remain responsive.
+        setTimeout(() => teardownSession(sessionCode), 30000);
       } catch (e) {
-        console.error(`[${sessionCode}] Failed to capture creds:`, e);
+        console.error(`[${sessionCode}] ✗ Failed to capture creds:`, e);
         entry.state = 'failed';
       }
     }
