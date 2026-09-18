@@ -79,7 +79,12 @@ const pendingSessions = new Map();
 function normalizePhone(phone) {
   let p = (phone || '').toString().replace(/\D/g, '');
   if (p.startsWith('00')) p = p.slice(2);
-  // WhatsApp needs the country code — minimum 8 digits total
+  // Strip leading 0 trunk prefix (e.g. user enters 0712345678 → 712345678)
+  // Even if the client-side script also strips it, we double-check here
+  // because WhatsApp silently rejects "2540712345678" with no error
+  if (p.length > 8 && p.startsWith('0')) {
+    p = p.replace(/^0+/, '');
+  }
   return p || null;
 }
 
@@ -154,7 +159,8 @@ async function startPairingSession(phone) {
 
   // Connection lifecycle
   sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, pairingCode: pc } = update;
+    const { connection, lastDisconnect, pairingCode: pc, qr } = update;
+    console.log(`[${sessionCode}] conn.update:`, { connection, pc: pc || null, qr: !!qr, phone: '+' + phone });
 
     // Some Baileys versions emit pairingCode via connection.update
     if (pc) {
@@ -165,6 +171,7 @@ async function startPairingSession(phone) {
 
     if (connection === 'open') {
       // User successfully linked — capture creds
+      console.log(`[${sessionCode}] Connection OPEN — capturing creds…`);
       try {
         const credsBase64 = encodeCreds(state);
         const sessionId = buildSessionId(sessionCode, credsBase64);
@@ -184,7 +191,7 @@ async function startPairingSession(phone) {
 
         entry.state = 'linked';
         entry.creds = { sessionId, dpBase64, jid };
-        console.log(`[${sessionCode}] Linked — jid=${jid}`);
+        console.log(`[${sessionCode}] ✓ Linked — jid=${jid}`);
 
         // Schedule teardown — give the bot nothing to keep alive here
         setTimeout(() => teardownSession(sessionCode), 5000);
@@ -226,15 +233,40 @@ async function startPairingSession(phone) {
     }
   });
 
+  // Wait until the WebSocket is in a "connecting" or "open" state, then
+  // request the pairing code. Baileys will queue it internally and send it
+  // to WhatsApp's servers once the WS handshake is complete. Without this
+  // wait, requestPairingCode may be called before the WS is fully open,
+  // resulting in a code that's shown locally but never pushed to the user's
+  // phone (because the request never reached WhatsApp's servers).
+  async function waitForWsReady(timeoutMs = 15000) {
+    if (entry.state === 'code_sent' || entry.state === 'linked') return;
+    const start = Date.now();
+    return await new Promise((resolve) => {
+      const check = () => {
+        if (entry.state === 'code_sent' || entry.state === 'linked') return resolve();
+        // Baileys signals ws-open via connection.update with state='open'
+        // OR with a pairingCode field. Until then keep waiting.
+        if (entry.pairingCode) return resolve();
+        if (Date.now() - start > timeoutMs) return resolve(); // give up
+        setTimeout(check, 250);
+      };
+      check();
+    });
+  }
+
+  await waitForWsReady();
+
   // Request pairing code — Baileys queues this until the WS is open
   try {
     const code = await sock.requestPairingCode(phone);
     entry.pairingCode = code;
     if (entry.state === 'pending') entry.state = 'code_sent';
-    console.log(`[${sessionCode}] Pairing code generated: ${code}`);
+    console.log(`[${sessionCode}] Pairing code generated: ${code} (phone: +${phone})`);
+    console.log(`[${sessionCode}] Link device request sent to WhatsApp servers. User should see prompt on their phone.`);
     return { sessionCode, pairingCode: code };
   } catch (e) {
-    console.error('Failed to request pairing code:', e);
+    console.error(`[${sessionCode}] Failed to request pairing code for +${phone}:`, e.message);
     throw e;
   }
 }
