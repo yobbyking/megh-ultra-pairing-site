@@ -34,36 +34,19 @@
         <label class="field-label">
           <span class="label-text">// Enter WhatsApp Number</span>
           <div class="phone-wrap">
-            <select id="countryCode" class="country-code">
-              <option value="254" data-flag="🇰🇪">+254 KE</option>
-              <option value="1"    data-flag="🇺🇸">+1  US</option>
-              <option value="44"   data-flag="🇬🇧">+44 UK</option>
-              <option value="234"  data-flag="🇳🇬">+234 NG</option>
-              <option value="91"   data-flag="🇮🇳">+91 IN</option>
-              <option value="27"   data-flag="🇿🇦">+27 ZA</option>
-              <option value="233"  data-flag="🇬🇭">+233 GH</option>
-              <option value="256"  data-flag="🇺🇬">+256 UG</option>
-              <option value="255"  data-flag="🇹🇿">+255 TZ</option>
-              <option value="971"  data-flag="🇦🇪">+971 AE</option>
-              <option value="966"  data-flag="🇸🇦">+966 SA</option>
-              <option value="880"  data-flag="🇧🇩">+880 BD</option>
-              <option value="92"   data-flag="🇵🇰">+92 PK</option>
-              <option value="61"   data-flag="🇦🇺">+61 AU</option>
-              <option value="49"   data-flag="🇩🇪">+49 DE</option>
-              <option value="33"   data-flag="🇫🇷">+33 FR</option>
-              <option value="34"   data-flag="🇪🇸">+34 ES</option>
-              <option value="39"   data-flag="🇮🇹">+39 IT</option>
-              <option value="7"    data-flag="🇷🇺">+7  RU</option>
-              <option value="55"   data-flag="🇧🇷">+55 BR</option>
-              <option value="52"   data-flag="🇲🇽">+52 MX</option>
-              <option value="62"   data-flag="🇮🇩">+62 ID</option>
-              <option value="63"   data-flag="🇵🇭">+63 PH</option>
-              <option value="60"   data-flag="🇲🇾">+60 MY</option>
-              <option value="65"   data-flag="🇸🇬">+65 SG</option>
-              <option value="81"   data-flag="🇯🇵">+81 JP</option>
-              <option value="82"   data-flag="🇰🇷">+82 KR</option>
-            </select>
-            <span class="prefix">+</span>
+            <span class="prefix cc-prefix">+</span>
+            <input
+              type="tel"
+              id="countryCode"
+              class="country-code-input"
+              placeholder="254"
+              inputmode="numeric"
+              autocomplete="off"
+              spellcheck="false"
+              maxlength="4"
+              value="254"
+            />
+            <span class="divider-vert"></span>
             <input
               type="tel"
               id="phone"
@@ -73,8 +56,20 @@
               spellcheck="false"
             />
           </div>
-          <small class="hint" id="phoneHint">Enter your local number WITHOUT country code (e.g. 712345678). The country code above will be prepended.</small>
+          <small class="hint" id="phoneHint">Country code (e.g. <code>254</code> Kenya, <code>1</code> USA, <code>44</code> UK, <code>91</code> India, <code>234</code> Nigeria) + your local number WITHOUT leading 0.</small>
         </label>
+
+        <div class="quick-cc">
+          <span class="quick-label">Quick pick:</span>
+          <button class="cc-btn" data-cc="254">🇰🇪 254</button>
+          <button class="cc-btn" data-cc="1">🇺🇸 1</button>
+          <button class="cc-btn" data-cc="44">🇬🇧 44</button>
+          <button class="cc-btn" data-cc="234">🇳🇬 234</button>
+          <button class="cc-btn" data-cc="91">🇮🇳 91</button>
+          <button class="cc-btn" data-cc="27">🇿🇦 27</button>
+          <button class="cc-btn" data-cc="971">🇦🇪 971</button>
+          <button class="cc-btn" data-cc="880">🇧🇩 880</button>
+        </div>
 
         <button id="btn-pair" class="btn-primary">
           <span class="btn-text">Generate Pairing Code</span>
