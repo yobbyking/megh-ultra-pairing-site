@@ -73,62 +73,53 @@ function showCopyToast() {
   setTimeout(() => t.classList.remove('show'), 1800);
 }
 
-// ─── Phone hint updates based on selected country ─────────────────
-const countrySelect = $('#countryCode');
+// ─── Phone hint + quick pick ───────────────────────────────────────
+const countryInput = $('#countryCode');
 const phoneInput = $('#phone');
 const phoneHint = $('#phoneHint');
 
-const COUNTRY_EXAMPLES = {
-  '254': '712345678',  // Kenya
-  '1':   '5551234567', // US
-  '44':  '7400123456', // UK
-  '234': '8012345678', // Nigeria
-  '91':  '9876543210', // India
-  '27':  '721345678',  // SA
-  '233': '244567890',  // Ghana
-  '256': '712345678',  // Uganda
-  '255': '712345678',  // Tanzania
-  '971': '501234567',  // UAE
-  '966': '512345678',  // Saudi
-  '880': '171234567',  // Bangladesh
-  '92':  '3012345678', // Pakistan
-  '61':  '412345678',  // Australia
-  '49':  '15123456789',// Germany
-  '33':  '612345678',  // France
-  '34':  '612345678',  // Spain
-  '39':  '3201234567', // Italy
-  '7':   '9123456789', // Russia
-  '55':  '11912345678',// Brazil
-  '52':  '5512345678', // Mexico
-  '62':  '812345678',  // Indonesia
-  '63':  '9171234567', // Philippines
-  '60':  '123456789',  // Malaysia
-  '65':  '81234567',   // Singapore
-  '81':  '9012345678', // Japan
-  '82':  '1023456789'  // Korea
-};
-
 function updatePhoneHint() {
-  const cc = countrySelect.value;
-  const example = COUNTRY_EXAMPLES[cc] || '123456789';
-  const flag = countrySelect.options[countrySelect.selectedIndex].dataset.flag || '🌍';
-  phoneHint.innerHTML = `Enter your <b>local</b> number WITHOUT country code.<br/>e.g. <code>${example}</code> → will pair as <code>+${cc}${example}</code> ${flag}`;
+  const cc = countryInput.value || '___';
+  phoneHint.innerHTML = `Pairing as <code>+${cc}</code> + your local number. <b>Strip leading 0</b> from your local number (e.g. <code>712345678</code>, not <code>0712345678</code>).`;
 }
-countrySelect.addEventListener('change', updatePhoneHint);
+countryInput.addEventListener('input', updatePhoneHint);
+phoneInput.addEventListener('input', updatePhoneHint);
 updatePhoneHint();
+
+// Quick-pick buttons
+document.querySelectorAll('.cc-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    countryInput.value = btn.dataset.cc;
+    updatePhoneHint();
+    phoneInput.focus();
+  });
+});
 
 // ─── Pairing flow ──────────────────────────────────────────────────
 let pollTimer = null;
 let currentSessionCode = null;
 
 async function requestPairing() {
-  const cc = countrySelect.value;
-  const local = phoneInput.value.trim().replace(/\D/g, '');
+  const cc = countryInput.value.trim().replace(/\D/g, '');
+  let local = phoneInput.value.trim().replace(/\D/g, '');
+
+  if (!cc) return showError('Enter country code (e.g. 254 for Kenya)');
+  if (cc.length < 1 || cc.length > 4) return showError('Country code must be 1-4 digits');
   if (!local) return showError('Enter your phone number');
   if (local.length < 5) return showError('Phone number too short');
 
-  // Combine country code + local number
+  // STRIP LEADING ZEROS (trunk prefix) — common in most countries outside US/Canada
+  // e.g. Kenya: 0712345678 → 712345678 → +254712345678
+  // This is critical: WhatsApp silently rejects "2540712345678" with no error
+  while (local.startsWith('0')) local = local.slice(1);
+
+  // Combine country code + local number — proper E.164 format
   const fullPhone = cc + local;
+
+  // Sanity check: total length 8-15 digits (E.164 standard)
+  if (fullPhone.length < 8 || fullPhone.length > 15) {
+    return showError('Invalid phone length: ' + fullPhone.length + ' digits. Should be 8-15.');
+  }
 
   const btn = $('#btn-pair');
   btn.disabled = true;
