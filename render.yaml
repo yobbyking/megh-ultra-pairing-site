@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: megh-ultra-pairing
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
