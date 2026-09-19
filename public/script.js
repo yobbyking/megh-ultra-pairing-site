@@ -135,7 +135,11 @@ async function requestPairing() {
     if (!data.ok) throw new Error(data.error || 'Failed to generate code');
 
     currentSessionCode = data.sessionCode;
-    if (data.pairingCode) animatePairingCode(data.pairingCode);
+    // ★ Strip any dashes from the code before animating — the server
+    // returns "F6AJ-JYPV" but animatePairingCode adds its own dash
+    // between index 3 and 4. Without stripping, we'd end up with
+    // "F6AJ--JYPV" when copying.
+    if (data.pairingCode) animatePairingCode(data.pairingCode.replace(/-/g, ''));
     showStep('step-code');
     startPolling();
   } catch (e) {
