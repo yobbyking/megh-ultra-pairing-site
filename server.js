@@ -1,22 +1,24 @@
 /**
  * MEGH MD — Pairing Site (Render-hosted)  [CommonJS — matches YOBBY MD pattern]
  *
- * Uses @whiskeysockets/baileys@^6.6.0 which is CommonJS-compatible (no ESM issues).
+ * Uses @whiskeysockets/baileys@^6.6.0 which is CommonJS-compatible.
  *
- * Critical socket options (learned from YOBBY MD's working implementation):
- *  - keepAliveIntervalMs: 30000   (ping WhatsApp every 30s so Render doesn't kill the WS)
- *  - connectTimeoutMs / qrTimeout: 120000
- *  - makeCacheableSignalKeyStore for the keys (faster key lookups during handshake)
- *  - Browsers.appropriate('Chrome') for correct device identity
- *
- * Pairing flow (matches YOBBY MD):
- *  1. Create socket with auth state
- *  2. Wait for `connection.update` with `qr` field (means WS is ready)
+ * Pairing flow (matches YOBBY MD exactly):
+ *  1. Create socket with auth state (from disk)
+ *  2. Wait for `connection.update` with `qr` field — Baileys' signal that WS is ready
  *  3. Also wait for `sock.wsReady === true` (extra safety)
  *  4. THEN call `requestPairingCode(phone)` — the code is actually pushed to WhatsApp
- *  5. User enters code on phone → connection.update fires with `state: 'open'`
- *  6. Wait 3s for all creds.update events to flush
- *  7. Encode creds → session ID → return to user
+ *  5. User enters code on phone
+ *  6. ★ WhatsApp sends new credentials → WS CLOSES (then must reconnect with new auth)
+ *  7. createSock() is called again — reads fresh auth state from disk (with new creds)
+ *  8. New socket fires `connection: 'open'` — we capture creds + build session ID
+ *  9. Keep socket alive for 30s so WhatsApp's "Logging in..." fully completes
+ *
+ * Critical socket options:
+ *  - keepAliveIntervalMs: 30000 (ping every 30s so Render doesn't kill WS)
+ *  - connectTimeoutMs / qrTimeout: 120000 (2 min)
+ *  - makeCacheableSignalKeyStore for keys
+ *  - Browsers.appropriate('Chrome') for correct device identity
  */
 
 'use strict';
@@ -76,10 +78,8 @@ const pendingSessions = new Map();
 // ─── Helpers ────────────────────────────────────────────────────────
 function normalizePhone(input) {
   if (!input) return null;
-  let p = String(input).replace(/[^\d]/g, ''); // digits only
+  let p = String(input).replace(/[^\d]/g, '');
   if (!p) return null;
-  // Strip one leading 0 (e.g., "0712345678" → "712345678") — but ONLY if
-  // there's still enough digits after (i.e. user provided a country code).
   if (p.length > 10 && p.startsWith('0')) p = p.slice(1);
   if (!/^\d{8,15}$/.test(p)) return null;
   return p;
@@ -102,7 +102,6 @@ function encodeCreds(state) {
 }
 
 async function downloadDpBase64(sock, jid) {
-  // 5-second timeout — never hangs the link flow
   try {
     const url = await Promise.race([
       sock.profilePictureUrl(jid, 'image'),
@@ -122,25 +121,23 @@ async function downloadDpBase64(sock, jid) {
   }
 }
 
-// ─── Start a temporary Baileys socket for pairing ───────────────────
-async function startPairingSession(phone) {
-  const sessionCode = randomSessionCode();
-  const sessionFolder = path.join(__dirname, 'data', 'auth', sessionCode);
-  fs.mkdirSync(sessionFolder, { recursive: true });
-
+// ─── ★ createSock() — extracted so we can RECONNECT on close ─────────
+//    Each call reads the FRESH auth state from disk. After WhatsApp sends
+//    new credentials during pairing, the WS closes. We call createSock()
+//    again, which re-reads the auth state (now containing the new creds)
+//    and creates a new socket. The new socket fires connection: 'open'
+//    with full auth — that's when we capture creds.
+async function createSock(sessionCode, phone, sessionFolder, entry) {
   const { version, isLatest } = await fetchLatestBaileysVersion();
   console.log(`[${sessionCode}] Using Baileys v${version.join('.')}${isLatest ? ' (latest)' : ''}`);
 
+  // ★ Re-read auth state from disk EVERY time createSock is called
+  //    This picks up credentials saved by previous socket instances.
   const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
 
   const browserConfig = Browsers.appropriate('Chrome');
-  console.log(`[${sessionCode}] Browser identity: ${JSON.stringify(browserConfig)}`);
-  console.log(`[${sessionCode}] Pairing phone: +${phone}`);
+  console.log(`[${sessionCode}] createSock — browser: ${JSON.stringify(browserConfig)}`);
 
-  // ★ Match YOBBY MD's socket options — these are critical for the link to complete.
-  //    - keepAliveIntervalMs: 30000 → ping WhatsApp every 30s so Render doesn't kill the WS
-  //    - connectTimeoutMs / qrTimeout: 120000 → 2 min timeouts
-  //    - makeCacheableSignalKeyStore for keys (faster handshake)
   const sock = makeWASocket({
     version,
     auth: {
@@ -153,7 +150,7 @@ async function startPairingSession(phone) {
     defaultQueryTimeoutMs: 120000,
     connectTimeoutMs: 120000,
     qrTimeout: 120000,
-    keepAliveIntervalMs: 30000,
+    keepAliveIntervalMs: 30000, // ★ ping every 30s — keeps WS alive on Render
     retryRequestDelayMs: 2000,
     generateHighQualityLinkPreview: true,
     shouldIgnoreJid: () => false,
@@ -163,16 +160,8 @@ async function startPairingSession(phone) {
     getMessage: async () => undefined
   });
 
-  const entry = {
-    sock,
-    phone,
-    pairingCode: null,
-    state: 'pending',
-    sessionFolder,
-    startedAt: Date.now(),
-    creds: null
-  };
-  pendingSessions.set(sessionCode, entry);
+  // Update entry with new socket
+  entry.sock = sock;
 
   // ─── Event handlers ────────────────────────────────────────────────
   sock.ev.on('creds.update', () => {
@@ -189,81 +178,38 @@ async function startPairingSession(phone) {
   });
 
   sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr, receivedPendingNotifications } = update;
+    const { connection, lastDisconnect, qr, receivedPendingNotifications, pairingCode: pc } = update;
     console.log(`[${sessionCode}] connection.update:`, JSON.stringify({
       connection,
       statusCode: lastDisconnect?.error?.output?.statusCode,
       hasQr: !!qr,
-      receivedPendingNotifications
+      receivedPendingNotifications,
+      pairingCode: pc || null
     }));
 
-    // Baileys emits `pairingCode` in some versions via connection.update
-    if (update.pairingCode) {
-      entry.pairingCode = update.pairingCode;
-      entry.state = 'code_sent';
-      console.log(`[${sessionCode}] Pairing code from event: ${update.pairingCode}`);
+    if (pc) {
+      entry.pairingCode = pc;
+      if (entry.state === 'pending') entry.state = 'code_sent';
+      console.log(`[${sessionCode}] Pairing code from event: ${pc}`);
     }
 
     if (connection === 'open') {
-      console.log(`[${sessionCode}] 🟢 Connection OPEN — sending WhatsApp messages to user's phone…`);
-
-      // Wait briefly for socket + creds to settle
-      await new Promise(r => setTimeout(r, 1500));
-
+      console.log(`[${sessionCode}] 🟢 Connection OPEN — waiting 3s for creds to fully save…`);
+      await new Promise(r => setTimeout(r, 3000));
+      console.log(`[${sessionCode}] Capturing creds now…`);
       try {
-        const jid = sock.user?.id;
-        const userName = sock.user?.name || sock.user?.verifiedName || 'Owner';
-        console.log(`[${sessionCode}] User: ${jid} (${userName})`);
-
-        // ─────────────────────────────────────────────────────────────
-        // MESSAGE 1: "Generation session....."
-        // ─────────────────────────────────────────────────────────────
-        try {
-          await sock.sendMessage(jid, { text: 'Generation session.....' });
-          console.log(`[${sessionCode}] ✓ Sent message 1: "Generation session....."`);
-        } catch (e) {
-          console.warn(`[${sessionCode}] Failed to send msg 1:`, e.message);
-        }
-
-        // Small delay so the user can read it
-        await new Promise(r => setTimeout(r, 1500));
-
-        // Build the session ID now
         const credsBase64 = encodeCreds(state);
         const sessionId = buildSessionId(sessionCode, credsBase64);
-        console.log(`[${sessionCode}] ✓ Built session ID (size=${credsBase64.length} chars)`);
+        const jid = sock.user?.id || state.creds?.me?.id;
+        console.log(`[${sessionCode}] ✓ jid=${jid}, creds size=${credsBase64.length} chars`);
 
-        // ─────────────────────────────────────────────────────────────
-        // MESSAGE 2: just the session ID itself
-        // e.g. megh-ultra:~3MWb2cme0eXWQlxR
-        // ─────────────────────────────────────────────────────────────
-        try {
-          await sock.sendMessage(jid, { text: sessionId });
-          console.log(`[${sessionCode}] ✓ Sent message 2 (session ID)`);
-        } catch (e) {
-          console.warn(`[${sessionCode}] Failed to send msg 2:`, e.message);
-        }
-
-        // Another small delay
-        await new Promise(r => setTimeout(r, 1000));
-
-        // ─────────────────────────────────────────────────────────────
-        // MESSAGE 3: "🟢 Session Linked" + deploy instructions + support
-        // ─────────────────────────────────────────────────────────────
-        const msg3 = `🟢 Session Linked\n\n🟢 Paste it as SESSION_ID during deploy or use auto enter on panel.\n🟢 Support: https://wa.me/message/25495314221`;
-        try {
-          await sock.sendMessage(jid, { text: msg3 });
-          console.log(`[${sessionCode}] ✓ Sent message 3 (Session Linked)`);
-        } catch (e) {
-          console.warn(`[${sessionCode}] Failed to send msg 3:`, e.message);
-        }
-
-        // Save to DB so the website can still show the session ID
         const dpBase64 = jid ? await downloadDpBase64(sock, jid) : null;
+        console.log(`[${sessionCode}] DP fetch: ${dpBase64 ? '✓ got' : 'null (no DP)'}`);
+
         insertUserStmt.run({
           phone,
           jid: jid || null,
-          name: userName,
+          name: null,
           dp_base64: dpBase64,
           session_code: sessionCode,
           session_id: sessionId,
@@ -272,15 +218,14 @@ async function startPairingSession(phone) {
         });
 
         entry.state = 'linked';
-        entry.creds = { sessionId, dpBase64, jid, userName };
-        console.log(`[${sessionCode}] ✓✓ Linked — session ID sent to user's WhatsApp`);
-        console.log(`[${sessionCode}] Socket going offline now — bot will activate when deployed on Pterodactyl`);
+        entry.creds = { sessionId, dpBase64, jid };
+        console.log(`[${sessionCode}] ✓✓ Linked — session ID ready`);
+        console.log(`[${sessionCode}] User can copy the session ID from the website now`);
 
-        // Disconnect after a short delay so the messages are delivered
-        // (matches the user's spec: "once it has done all bot goes offline")
-        setTimeout(() => teardownSession(sessionCode), 5000);
+        // Keep socket alive for 30s so WhatsApp's "Logging in..." completes
+        setTimeout(() => teardownSession(sessionCode), 30000);
       } catch (e) {
-        console.error(`[${sessionCode}] ✗ Failed to send WhatsApp messages:`, e);
+        console.error(`[${sessionCode}] ✗ Failed to capture creds:`, e);
         entry.state = 'failed';
       }
     }
@@ -291,23 +236,67 @@ async function startPairingSession(phone) {
 
       if (entry.state === 'linked') return; // already done, will be torn down
 
-      // If we already have a pairing code, don't restart — would invalidate the code
-      if (entry.state === 'code_sent' || entry.pairingCode) {
-        console.log(`[${sessionCode}] Preserving pairing code (not restarting). User can still enter the code on their phone.`);
-        return;
-      }
-
       if (statusCode === DisconnectReason.loggedOut || statusCode === 410) {
+        console.log(`[${sessionCode}] ✗ Logged out / 410 — not retrying`);
         entry.state = 'failed';
         return;
       }
 
-      if (entry.state === 'pending') {
-        console.log(`[${sessionCode}] Connection closed (${statusCode}). Not auto-restarting — user can retry.`);
-        entry.state = 'failed';
-      }
+      // ★ THIS IS THE CRITICAL FIX: When the WS closes during pairing
+      //    (because WhatsApp sent new credentials and the socket must
+      //    reconnect), we create a NEW socket using the same auth folder.
+      //    The new socket will read the freshly-saved credentials from
+      //    disk, connect with full auth, and fire connection: 'open'.
+      //    That's when we capture creds and build the session ID.
+      //
+      //    The OLD code just returned without reconnecting — the socket
+      //    stayed dead, WhatsApp couldn't reach us, "Logging in..." hung
+      //    forever on the user's phone.
+      console.log(`[${sessionCode}] ↻ Reconnecting in 3s (createSock with fresh auth state)…`);
+
+      // Clean up old listeners to prevent duplicates on the new socket
+      try {
+        sock.ev.removeAllListeners('messages.upsert');
+        sock.ev.removeAllListeners('connection.update');
+        sock.ev.removeAllListeners('creds.update');
+      } catch {}
+
+      setTimeout(async () => {
+        try {
+          await createSock(sessionCode, phone, sessionFolder, entry);
+          console.log(`[${sessionCode}] ✅ Reconnected — waiting for new socket to fire 'open'`);
+        } catch (e) {
+          console.error(`[${sessionCode}] Reconnect failed:`, e.message);
+          entry.state = 'failed';
+        }
+      }, 3000);
     }
   });
+
+  return sock;
+}
+
+// ─── Start a pairing session ─────────────────────────────────────────
+async function startPairingSession(phone) {
+  const sessionCode = randomSessionCode();
+  const sessionFolder = path.join(__dirname, 'data', 'auth', sessionCode);
+  fs.mkdirSync(sessionFolder, { recursive: true });
+
+  console.log(`[${sessionCode}] Pairing phone: +${phone}`);
+
+  const entry = {
+    sock: null, // will be set by createSock
+    phone,
+    pairingCode: null,
+    state: 'pending',
+    sessionFolder,
+    startedAt: Date.now(),
+    creds: null
+  };
+  pendingSessions.set(sessionCode, entry);
+
+  // ★ Create initial socket (registers all event handlers)
+  const sock = await createSock(sessionCode, phone, sessionFolder, entry);
 
   // ─── ★ Wait for the QR event before requesting pairing code ────────
   // (matches YOBBY MD pattern — the QR event signals the socket is fully open)
@@ -322,7 +311,6 @@ async function startPairingSession(phone) {
 
     const handler = (update) => {
       const { connection, qr, lastDisconnect } = update;
-      // ★ QR event = socket ready to receive pairing code request
       if (qr && !resolved) {
         resolved = true;
         clearTimeout(timeout);
@@ -330,7 +318,6 @@ async function startPairingSession(phone) {
         console.log(`[${sessionCode}] ✓ QR event received — socket ready for pairing code`);
         resolve();
       } else if (connection === 'open' && !resolved) {
-        // Already open (existing auth) — also ready
         resolved = true;
         clearTimeout(timeout);
         sock.ev.off('connection.update', handler);
@@ -466,9 +453,9 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`╔══════════════════════════════════════════════╗`);
-  console.log(`║   MEGH MD — Pairing Site v1.1  (Baileys 6.6)  ║`);
+  console.log(`║   MEGH MD — Pairing Site v1.2  (Baileys 6.6)  ║`);
   console.log(`╚══════════════════════════════════════════════╝`);
   console.log(`\nMEGH MD pairing site live on :${PORT}`);
   console.log(`Browser: ${JSON.stringify(Browsers.appropriate('Chrome'))}`);
-  console.log(`Socket options: keepAliveIntervalMs=30000, connectTimeoutMs=120000, qrTimeout=120000\n`);
+  console.log(`Socket: keepAlive=30s, connectTimeout=120s, qrTimeout=120s, reconnect on close=ON\n`);
 });
