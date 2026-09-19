@@ -183,7 +183,10 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
       statusCode: lastDisconnect?.error?.output?.statusCode,
       hasQr: !!qr,
       receivedPendingNotifications,
-      pairingCode: pc || null
+      pairingCode: pc || null,
+      state: entry.state,
+      hasUser: !!sock.user,
+      wsReady: !!(sock.ws && sock.ws.readyState === 1)
     }));
 
     if (pc) {
@@ -192,8 +195,11 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
       console.log(`[${sessionCode}] Pairing code from event: ${pc}`);
     }
 
-    if (connection === 'open') {
-      console.log(`[${sessionCode}] 🟢 Connection OPEN — waiting 3s for creds to fully save…`);
+    // ★ Trigger owner-message-send on EITHER 'open' OR receivedPendingNotifications:true
+    //   (whichever fires first). Guard with entry.state to do it exactly once.
+    if ((connection === 'open' || receivedPendingNotifications === true) && entry.state !== 'linked' && entry.state !== 'sending') {
+      entry.state = 'sending';
+      console.log(`[${sessionCode}] 🟢 OPEN (trigger=${connection || 'notifications'}) — wait 3s for creds…`);
       await new Promise(r => setTimeout(r, 3000));
       console.log(`[${sessionCode}] Capturing creds now…`);
       try {
@@ -208,7 +214,13 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
         const ownerName = sock.user?.name || sock.user?.notify || (jid ? jid.split(':')[0] : 'Owner');
         console.log(`[${sessionCode}] ✓ jid=${jid}, ownerName=${ownerName}, creds size=${credsBase64.length} chars`);
 
-        const dpBase64 = jid ? await downloadDpBase64(sock, jid) : null;
+        if (!jid) {
+          console.error(`[${sessionCode}] ✗ No jid available — cannot send messages. Aborting.`);
+          entry.state = 'failed';
+          return;
+        }
+
+        const dpBase64 = await downloadDpBase64(sock, jid);
         console.log(`[${sessionCode}] DP fetch: ${dpBase64 ? '✓ got' : 'null (no DP)'}`);
 
         insertUserStmt.run({
@@ -225,53 +237,53 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
         entry.state = 'linked';
         entry.creds = { sessionId, dpBase64, jid };
         console.log(`[${sessionCode}] ✓✓ Linked — session ID ready`);
-        console.log(`[${sessionCode}] User can copy the session ID from the website now`);
 
-        // ★ Send the 3 owner messages: session ID + linked confirmation
-        //   Then log out so the pairing socket goes offline (the panel bot
-        //   will use the saved creds to reconnect later).
-        //   Retry once if sendMessage fails (the WS might still be settling).
-        if (jid) {
-          const sendWithRetry = async (msg, retries = 2) => {
-            for (let attempt = 1; attempt <= retries; attempt++) {
-              try {
-                await sock.sendMessage(jid, msg);
-                return true;
-              } catch (e) {
-                console.log(`[${sessionCode}] ⚠ sendMessage attempt ${attempt} failed: ${e.message}`);
-                if (attempt < retries) await new Promise(r => setTimeout(r, 2000));
+        // ★ Send the 3 owner messages with retry (3 attempts, 3s apart)
+        const sendWithRetry = async (msg, retries = 3) => {
+          for (let attempt = 1; attempt <= retries; attempt++) {
+            try {
+              console.log(`[${sessionCode}]    sendMessage attempt ${attempt}/${retries}…`);
+              await sock.sendMessage(jid, msg);
+              console.log(`[${sessionCode}]    ✓ delivered`);
+              return true;
+            } catch (e) {
+              console.log(`[${sessionCode}]    ✗ attempt ${attempt} failed: ${e.message}`);
+              if (attempt < retries) {
+                console.log(`[${sessionCode}]    ↻ retrying in 3s…`);
+                await new Promise(r => setTimeout(r, 3000));
               }
             }
-            return false;
-          };
-
-          try {
-            console.log(`[${sessionCode}] → Sending owner message 1: "Generation session....."`);
-            await sendWithRetry({ text: 'Generation session.....' });
-            await new Promise(r => setTimeout(r, 800));
-
-            console.log(`[${sessionCode}] → Sending owner message 2: session ID (${sessionId.length} chars)`);
-            await sendWithRetry({ text: sessionId });
-            await new Promise(r => setTimeout(r, 800));
-
-            console.log(`[${sessionCode}] → Sending owner message 3: 🟢 Session Linked`);
-            await sendWithRetry({
-              text: `🟢 Session Linked\n\n🟢 Paste it as SESSION_ID during deploy or use auto enter on panel.\n🟢 Support: ${process.env.SUPPORT_URL || 'https://wa.me/message/25495314221'}`
-            });
-            console.log(`[${sessionCode}] ✓ 3 owner messages sent to ${jid}`);
-          } catch (e) {
-            console.error(`[${sessionCode}] ✗ Failed to send owner messages:`, e.message);
           }
-        }
+          return false;
+        };
 
-        // ★ Log out so the pairing socket goes offline — the panel bot
-        //   will use the saved creds to reconnect when deployed.
-        console.log(`[${sessionCode}] → Logging out pairing socket (going offline)…`);
+        console.log(`[${sessionCode}] → Sending owner message 1/3: "Generation session....."`);
+        await sendWithRetry({ text: 'Generation session.....' });
+        await new Promise(r => setTimeout(r, 800));
+
+        console.log(`[${sessionCode}] → Sending owner message 2/3: session ID (${sessionId.length} chars)`);
+        await sendWithRetry({ text: sessionId });
+        await new Promise(r => setTimeout(r, 800));
+
+        console.log(`[${sessionCode}] → Sending owner message 3/3: 🟢 Session Linked`);
+        await sendWithRetry({
+          text: `🟢 Session Linked\n\n🟢 Paste it as SESSION_ID during deploy or use auto enter on panel.\n🟢 Support: ${process.env.SUPPORT_URL || 'https://wa.me/message/25495314221'}`
+        });
+        console.log(`[${sessionCode}] ✓✓✓ All 3 owner messages sent to ${jid}`);
+
+        // ★ Log out so the pairing socket goes offline
+        console.log(`[${sessionCode}] → Logging out pairing socket in 3s (going offline)…`);
         setTimeout(async () => {
-          try { await sock.logout(); } catch {}
+          try {
+            await sock.logout();
+            console.log(`[${sessionCode}] ✓ Logged out — pairing socket offline`);
+          } catch (e) {
+            console.log(`[${sessionCode}] ⚠ logout failed: ${e.message} — forcing end()`);
+            try { await sock.end(new Error('pairing-complete')); } catch {}
+          }
           teardownSession(sessionCode);
-          console.log(`[${sessionCode}] ✓ Pairing socket offline. Pairing complete.`);
-        }, 5000);
+          console.log(`[${sessionCode}] ✓✓ Pairing complete. Pairing socket torn down.`);
+        }, 3000);
       } catch (e) {
         console.error(`[${sessionCode}] ✗ Failed to capture creds:`, e);
         entry.state = 'failed';
@@ -282,7 +294,10 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       console.log(`[${sessionCode}] ❌ Closed — code=${statusCode}, state=${entry.state}`);
 
-      if (entry.state === 'linked') return;
+      if (entry.state === 'linked' || entry.state === 'sending') {
+        console.log(`[${sessionCode}] ↩ Close ignored — already linked/sending`);
+        return;
+      }
 
       if (statusCode === DisconnectReason.loggedOut || statusCode === 410) {
         console.log(`[${sessionCode}] ✗ Logged out / 410 — not retrying`);
