@@ -1,9 +1,10 @@
 /**
- * MEGH MD — Pairing Site (Render-hosted)  [CommonJS — matches YOBBY MD pattern]
+ * MEGH MD — Pairing Site (Render-hosted)  [CommonJS — uses mrxd-baileys fork]
  *
- * Uses @whiskeysockets/baileys@^6.6.0 which is CommonJS-compatible.
+ * Uses mrxd-baileys@1.0.2 — a CJS-compatible Baileys fork that exports the
+ * same API as @whiskeysockets/baileys but works with require() (no ESM issues).
  *
- * Pairing flow (matches YOBBY MD exactly):
+ * Pairing flow (matches YOBBY MD pattern):
  *  1. Create socket with auth state (from disk)
  *  2. Wait for `connection.update` with `qr` field — Baileys' signal that WS is ready
  *  3. Also wait for `sock.wsReady === true` (extra safety)
@@ -35,7 +36,7 @@ const {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   Browsers
-} = require('@whiskeysockets/baileys');
+} = require('mrxd-baileys');
 const P = require('pino');
 const Database = require('better-sqlite3');
 
@@ -453,9 +454,10 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`╔══════════════════════════════════════════════╗`);
-  console.log(`║   MEGH MD — Pairing Site v1.2  (Baileys 6.6)  ║`);
+  console.log(`║   MEGH MD — Pairing Site v1.3 (mrxd-baileys)  ║`);
   console.log(`╚══════════════════════════════════════════════╝`);
   console.log(`\nMEGH MD pairing site live on :${PORT}`);
+  console.log(`Package: mrxd-baileys@1.0.2 (CJS-compatible Baileys fork)`);
   console.log(`Browser: ${JSON.stringify(Browsers.appropriate('Chrome'))}`);
   console.log(`Socket: keepAlive=30s, connectTimeout=120s, qrTimeout=120s, reconnect on close=ON\n`);
 });
