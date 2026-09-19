@@ -1,7 +1,7 @@
 {
   "name": "megh-ultra-pairing-site",
-  "version": "1.1.0",
-  "description": "Premium WhatsApp pairing site for MEGH MD bot — generates pairing codes (no QR) using official Baileys v6.6.0",
+  "version": "1.2.1",
+  "description": "Premium WhatsApp pairing site for MEGH MD bot — generates pairing codes (no QR) using @tristancage/baileys (CJS-compatible Baileys fork)",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -12,7 +12,7 @@
     "node": "20.x"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.6.0",
+    "@whiskeysockets/baileys": "npm:@tristancage/baileys@6.7.4",
     "express": "^4.19.2",
     "better-sqlite3": "^12.0.0",
     "pino": "^9.4.0",
