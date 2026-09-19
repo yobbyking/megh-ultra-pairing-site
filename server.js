@@ -1,8 +1,10 @@
 /**
- * MEGH MD — Pairing Site (Render-hosted)  [CommonJS — uses official @whiskeysockets/baileys]
+ * MEGH MD — Pairing Site (Render-hosted)  [ESM — uses official @whiskeysockets/baileys]
  *
- * v2.0 — switched from the mrxd-baileys fork to the official Baileys package
- *        so we get full WhatsApp compatibility + ongoing updates.
+ * v2.0.1 — official Baileys is published as ESM-only, so this file is now
+ *          ESM (package.json has "type": "module"). CJS deps like express,
+ *          better-sqlite3, pino are imported via `import x from 'pkg'` which
+ *          works fine from ESM.
  *
  * Pairing flow:
  *  1. fetchLatestBaileysVersion() — official Baileys REQUIRES this; without it
@@ -15,31 +17,29 @@
  *  7. createSock() is called again — reads fresh auth state from disk (with new creds)
  *  8. New socket fires `connection: 'open'` — we capture creds + build session ID
  *  9. Keep socket alive for 30s so WhatsApp's "Logging in..." fully completes
- *
- * Critical socket options:
- *  - keepAliveIntervalMs: 30000 (ping every 30s so Render doesn't kill WS)
- *  - connectTimeoutMs / qrTimeout: 120000 (2 min)
- *  - makeCacheableSignalKeyStore for keys
- *  - Browsers.appropriate('Chrome') for correct Chrome device identity
  */
 
 'use strict';
 
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-const fs = require('fs');
-const crypto = require('crypto');
-const {
-  default: makeWASocket,
+import express from 'express';
+import cors from 'cors';
+import path from 'node:path';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   Browsers
-} = require('@whiskeysockets/baileys');
-const P = require('pino');
-const Database = require('better-sqlite3');
+} from '@whiskeysockets/baileys';
+import P from 'pino';
+import Database from 'better-sqlite3';
+
+// __dirname is not defined in ESM — derive it from import.meta.url
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(cors());
@@ -124,32 +124,22 @@ async function downloadDpBase64(sock, jid) {
 }
 
 // ─── ★ createSock() — extracted so we can RECONNECT on close ─────────
-//    Each call reads the FRESH auth state from disk. After WhatsApp sends
-//    new credentials during pairing, the WS closes. We call createSock()
-//    again, which re-reads the auth state (now containing the new creds)
-//    and creates a new socket. The new socket fires connection: 'open'
-//    with full auth — that's when we capture creds.
 async function createSock(sessionCode, phone, sessionFolder, entry) {
   // ★ Official Baileys REQUIRES fetchLatestBaileysVersion() — without it,
   //    WhatsApp will reject the connection with status 405 (bad version).
-  //    The old mrxd-baileys fork had a hardcoded version; the official
-  //    package fetches it dynamically from WhatsApp's servers.
   const { version, isLatest } = await fetchLatestBaileysVersion();
   console.log(`[${sessionCode}] createSock — Baileys v${version.join('.')} (latest: ${isLatest})`);
 
   // ★ Re-read auth state from disk EVERY time createSock is called
-  //    This picks up credentials saved by previous socket instances.
   const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
 
   // ★ Chrome browser fingerprint — Browsers.appropriate('Chrome') returns
-  //    ['Ubuntu', 'Chrome', '20.04.4'] (or similar), which is what WhatsApp
-  //    expects for a normal WhatsApp Web session. This avoids the bot-detection
-  //    flag that using a custom name would trigger.
+  //    ['Ubuntu', 'Chrome', '<kernel>'] which is what WhatsApp Web users see.
   const browserConfig = Browsers.appropriate('Chrome');
   console.log(`[${sessionCode}] createSock — browser: ${JSON.stringify(browserConfig)}`);
 
   const sock = makeWASocket({
-    version, // ★ Required by official Baileys
+    version,
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger)
@@ -160,7 +150,7 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
     defaultQueryTimeoutMs: 120000,
     connectTimeoutMs: 120000,
     qrTimeout: 120000,
-    keepAliveIntervalMs: 30000, // ★ ping every 30s — keeps WS alive on Render
+    keepAliveIntervalMs: 30000,
     retryRequestDelayMs: 2000,
     generateHighQualityLinkPreview: false,
     shouldIgnoreJid: () => false,
@@ -170,7 +160,6 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
     getMessage: async () => undefined
   });
 
-  // Update entry with new socket
   entry.sock = sock;
 
   // ─── Event handlers ────────────────────────────────────────────────
@@ -232,7 +221,6 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
         console.log(`[${sessionCode}] ✓✓ Linked — session ID ready`);
         console.log(`[${sessionCode}] User can copy the session ID from the website now`);
 
-        // Keep socket alive for 30s so WhatsApp's "Logging in..." completes
         setTimeout(() => teardownSession(sessionCode), 30000);
       } catch (e) {
         console.error(`[${sessionCode}] ✗ Failed to capture creds:`, e);
@@ -244,7 +232,7 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       console.log(`[${sessionCode}] ❌ Closed — code=${statusCode}, state=${entry.state}`);
 
-      if (entry.state === 'linked') return; // already done, will be torn down
+      if (entry.state === 'linked') return;
 
       if (statusCode === DisconnectReason.loggedOut || statusCode === 410) {
         console.log(`[${sessionCode}] ✗ Logged out / 410 — not retrying`);
@@ -252,15 +240,9 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
         return;
       }
 
-      // ★ THIS IS THE CRITICAL FIX: When the WS closes during pairing
-      //    (because WhatsApp sent new credentials and the socket must
-      //    reconnect), we create a NEW socket using the same auth folder.
-      //    The new socket will read the freshly-saved credentials from
-      //    disk, connect with full auth, and fire connection: 'open'.
-      //    That's when we capture creds and build the session ID.
+      // ★ Reconnect with fresh auth state — picks up new creds from disk
       console.log(`[${sessionCode}] ↻ Reconnecting in 3s (createSock with fresh auth state)…`);
 
-      // Clean up old listeners to prevent duplicates on the new socket
       try {
         sock.ev.removeAllListeners('messages.upsert');
         sock.ev.removeAllListeners('connection.update');
@@ -291,7 +273,7 @@ async function startPairingSession(phone) {
   console.log(`[${sessionCode}] Pairing phone: +${phone}`);
 
   const entry = {
-    sock: null, // will be set by createSock
+    sock: null,
     phone,
     pairingCode: null,
     state: 'pending',
@@ -301,8 +283,7 @@ async function startPairingSession(phone) {
   };
   pendingSessions.set(sessionCode, entry);
 
-  // ★ Create initial socket (registers all event handlers)
-  //    Retry up to 3 times on transient errors (network/rate-limit).
+  // ★ Create initial socket with retries
   let sock;
   let lastError = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -322,9 +303,6 @@ async function startPairingSession(phone) {
   }
 
   // ─── ★ Wait for the QR event before requesting pairing code ────────
-  // The QR event signals the socket is fully open + ready to receive commands.
-  // We don't actually use the QR — we use the pairing code instead — but
-  // waiting for the QR event is the safest signal that the WS is ready.
   await new Promise((resolve, reject) => {
     let resolved = false;
     const timeout = setTimeout(() => {
@@ -353,9 +331,6 @@ async function startPairingSession(phone) {
         clearTimeout(timeout);
         sock.ev.off('connection.update', handler);
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        // 405 = Method Not Allowed — usually means Baileys version mismatch
-        // 419 = rate-limited — too many pairing attempts
-        // 401/403 = unauthorized — auth state is invalid
         if (statusCode === 405 || statusCode === 419) {
           reject(new Error(
             `WhatsApp rejected the connection (status ${statusCode}). ` +
@@ -371,11 +346,6 @@ async function startPairingSession(phone) {
   }).catch(e => {
     throw new Error(`Failed to connect to WhatsApp: ${e.message}`);
   });
-
-  // ★ The old mrxd-baileys fork had a `sock.wsReady` property that we polled
-  //   for extra safety. The official Baileys package does NOT have this —
-  //   the `qr` event above is the correct readiness signal. We skip the
-  //   wsReady check here.
 
   // ─── ★ Now request the pairing code — socket is fully ready ───────
   let code;
@@ -482,10 +452,10 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`╔══════════════════════════════════════════════╗`);
-  console.log(`║   MEGH MD — Pairing Site v2.0 (official Baileys) ║`);
+  console.log(`║   MEGH MD — Pairing Site v2.0.1 (ESM, official Baileys) ║`);
   console.log(`╚══════════════════════════════════════════════╝`);
   console.log(`\nMEGH MD pairing site live on :${PORT}`);
-  console.log(`Package: @whiskeysockets/baileys (official)`);
+  console.log(`Package: @whiskeysockets/baileys (official ESM)`);
   console.log(`Browser: ${JSON.stringify(Browsers.appropriate('Chrome'))}`);
   console.log(`Socket: keepAlive=30s, connectTimeout=120s, qrTimeout=120s, reconnect on close=ON\n`);
 });
