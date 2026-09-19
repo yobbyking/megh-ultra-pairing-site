@@ -230,21 +230,35 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
         // ★ Send the 3 owner messages: session ID + linked confirmation
         //   Then log out so the pairing socket goes offline (the panel bot
         //   will use the saved creds to reconnect later).
+        //   Retry once if sendMessage fails (the WS might still be settling).
         if (jid) {
+          const sendWithRetry = async (msg, retries = 2) => {
+            for (let attempt = 1; attempt <= retries; attempt++) {
+              try {
+                await sock.sendMessage(jid, msg);
+                return true;
+              } catch (e) {
+                console.log(`[${sessionCode}] ⚠ sendMessage attempt ${attempt} failed: ${e.message}`);
+                if (attempt < retries) await new Promise(r => setTimeout(r, 2000));
+              }
+            }
+            return false;
+          };
+
           try {
             console.log(`[${sessionCode}] → Sending owner message 1: "Generation session....."`);
-            await sock.sendMessage(jid, { text: 'Generation session.....' });
+            await sendWithRetry({ text: 'Generation session.....' });
             await new Promise(r => setTimeout(r, 800));
 
-            console.log(`[${sessionCode}] → Sending owner message 2: session ID`);
-            await sock.sendMessage(jid, { text: sessionId });
+            console.log(`[${sessionCode}] → Sending owner message 2: session ID (${sessionId.length} chars)`);
+            await sendWithRetry({ text: sessionId });
             await new Promise(r => setTimeout(r, 800));
 
             console.log(`[${sessionCode}] → Sending owner message 3: 🟢 Session Linked`);
-            await sock.sendMessage(jid, {
+            await sendWithRetry({
               text: `🟢 Session Linked\n\n🟢 Paste it as SESSION_ID during deploy or use auto enter on panel.\n🟢 Support: ${process.env.SUPPORT_URL || 'https://wa.me/message/25495314221'}`
             });
-            console.log(`[${sessionCode}] ✓ 3 owner messages sent`);
+            console.log(`[${sessionCode}] ✓ 3 owner messages sent to ${jid}`);
           } catch (e) {
             console.error(`[${sessionCode}] ✗ Failed to send owner messages:`, e.message);
           }
