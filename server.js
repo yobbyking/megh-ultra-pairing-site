@@ -33,7 +33,6 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   Browsers
 } = require('mrxd-baileys');
@@ -129,18 +128,26 @@ async function downloadDpBase64(sock, jid) {
 //    and creates a new socket. The new socket fires connection: 'open'
 //    with full auth — that's when we capture creds.
 async function createSock(sessionCode, phone, sessionFolder, entry) {
-  const { version, isLatest } = await fetchLatestBaileysVersion();
-  console.log(`[${sessionCode}] Using Baileys v${version.join('.')}${isLatest ? ' (latest)' : ''}`);
+  // ★ DO NOT call fetchLatestBaileysVersion() — it returns a version from
+  // WhatsApp's servers that doesn't match what mrxd-baileys expects.
+  // The fork has its own hardcoded version [2, 3000, 1032141294] in
+  // lib/Defaults/baileys-version.json. Overriding it caused status 405
+  // (Method Not Allowed) rejections from WhatsApp.
+  // Just use the fork's default by not passing `version`.
+  console.log(`[${sessionCode}] createSock — using mrxd-baileys default version`);
 
   // ★ Re-read auth state from disk EVERY time createSock is called
   //    This picks up credentials saved by previous socket instances.
   const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
 
-  const browserConfig = Browsers.appropriate('Chrome');
+  // ★ Use Browsers.ubuntu('Chrome') — matches the fork's default
+  //    (Browsers.appropriate('Chrome') returns the same thing, but being
+  //    explicit here for clarity + matches what the fork tests with)
+  const browserConfig = Browsers.ubuntu('Chrome');
   console.log(`[${sessionCode}] createSock — browser: ${JSON.stringify(browserConfig)}`);
 
   const sock = makeWASocket({
-    version,
+    // ★ No `version` field — let the fork use its hardcoded default
     auth: {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger)
@@ -153,7 +160,7 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
     qrTimeout: 120000,
     keepAliveIntervalMs: 30000, // ★ ping every 30s — keeps WS alive on Render
     retryRequestDelayMs: 2000,
-    generateHighQualityLinkPreview: true,
+    generateHighQualityLinkPreview: false,
     shouldIgnoreJid: () => false,
     markOnlineOnConnect: false,
     syncFullHistory: false,
@@ -297,7 +304,26 @@ async function startPairingSession(phone) {
   pendingSessions.set(sessionCode, entry);
 
   // ★ Create initial socket (registers all event handlers)
-  const sock = await createSock(sessionCode, phone, sessionFolder, entry);
+  //    Retry up to 3 times on status 405 (WhatsApp rate-limiting / temp block).
+  //    405 isn't fatal — the fork's UNAUTHORIZED_CODES = [401, 403, 419]
+  //    doesn't include 405, meaning it's retryable.
+  let sock;
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      sock = await createSock(sessionCode, phone, sessionFolder, entry);
+      break;
+    } catch (e) {
+      lastError = e;
+      if (attempt < 3) {
+        console.log(`[${sessionCode}] Attempt ${attempt} failed: ${e.message}. Retrying in 10s…`);
+        await new Promise(r => setTimeout(r, 10000));
+      }
+    }
+  }
+  if (!sock) {
+    throw new Error(`Could not connect to WhatsApp after 3 attempts. Last error: ${lastError?.message || 'unknown'}. This is usually a temporary rate-limit — wait 15-30 minutes and try again.`);
+  }
 
   // ─── ★ Wait for the QR event before requesting pairing code ────────
   // (matches YOBBY MD pattern — the QR event signals the socket is fully open)
@@ -329,7 +355,19 @@ async function startPairingSession(phone) {
         clearTimeout(timeout);
         sock.ev.off('connection.update', handler);
         const statusCode = lastDisconnect?.error?.output?.statusCode;
-        reject(new Error(`Connection closed (status ${statusCode}). WhatsApp rejected the connection.`));
+        // 405 = Method Not Allowed — WhatsApp's anti-abuse system is blocking us
+        // 419 = rate-limited — too many pairing attempts
+        // 401/403 = unauthorized — auth state is invalid
+        // For 405/419, give a helpful "wait and retry" message
+        if (statusCode === 405 || statusCode === 419) {
+          reject(new Error(
+            `WhatsApp rejected the connection (status ${statusCode}). ` +
+            `This is usually a temporary rate-limit. ` +
+            `Wait 15-30 minutes, try a different phone number, or use a different host (Render free tier IPs are often flagged).`
+          ));
+        } else {
+          reject(new Error(`Connection closed (status ${statusCode}). WhatsApp rejected the connection.`));
+        }
       }
     };
     sock.ev.on('connection.update', handler);
