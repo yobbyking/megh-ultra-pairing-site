@@ -95,10 +95,25 @@ function buildSessionId(sessionCode, credsBase64) {
   return `megh-ultra:~${sessionCode}~${credsBase64}`;
 }
 
-function encodeCreds(state) {
+function encodeCreds(state, sessionFolder) {
+  // state.keys in @whiskeysockets/baileys@^6.7 is a SignalKeyStore proxy
+  // (has get/set/del methods, not enumerable). To serialize the keys for
+  // the panel bot, we read the auth folder files directly.
+  // Each key is stored as a JSON file in the auth folder (e.g. app-state-sync-Key-1.json).
+  const keysObj = {};
+  if (sessionFolder && fs.existsSync(sessionFolder)) {
+    for (const fname of fs.readdirSync(sessionFolder)) {
+      if (!fname.endsWith('.json')) continue;
+      try {
+        const content = fs.readFileSync(path.join(sessionFolder, fname), 'utf8');
+        // Strip the .json extension to get the key name
+        keysObj[fname.slice(0, -5)] = JSON.parse(content);
+      } catch {}
+    }
+  }
   const json = JSON.stringify({
     creds: state.creds,
-    keys: state.keys ? Array.from(state.keys.entries()) : []
+    keys: keysObj
   });
   return Buffer.from(json, 'utf8').toString('base64url');
 }
@@ -164,8 +179,18 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
 
   // ─── Event handlers ────────────────────────────────────────────────
   sock.ev.on('creds.update', () => {
-    console.log(`[${sessionCode}] 🔑 creds.update (saving to disk)`);
+    console.log(`[${sessionCode}] 🔑 creds.update (saving to disk) | me=${!!state.creds?.me?.id}`);
     saveCreds();
+    // ★ KEY FIX: When creds.update fires AND state.creds.me.id is present,
+    //    WhatsApp has paired the user. Trigger the owner-message-send path
+    //    right here — don't wait for connection:open (which may never fire
+    //    on Render's networking setup).
+    if (state.creds?.me?.id && entry.state !== 'linked' && entry.state !== 'sending') {
+      console.log(`[${sessionCode}] 🟢 creds.update has me.id=${state.creds.me.id} — triggering send path`);
+      triggerOwnerMessages(sessionCode, phone, sessionFolder, entry, sock, 'creds.update').catch(e => {
+        console.error(`[${sessionCode}] creds.update send path failed:`, e.message);
+      });
+    }
   });
 
   sock.ev.on('messages.upsert', ({ messages, type }) => {
@@ -186,6 +211,7 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
       pairingCode: pc || null,
       state: entry.state,
       hasUser: !!sock.user,
+      hasMe: !!state.creds?.me?.id,
       wsReady: !!(sock.ws && sock.ws.readyState === 1)
     }));
 
@@ -198,96 +224,8 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
     // ★ Trigger owner-message-send on EITHER 'open' OR receivedPendingNotifications:true
     //   (whichever fires first). Guard with entry.state to do it exactly once.
     if ((connection === 'open' || receivedPendingNotifications === true) && entry.state !== 'linked' && entry.state !== 'sending') {
-      entry.state = 'sending';
-      console.log(`[${sessionCode}] 🟢 OPEN (trigger=${connection || 'notifications'}) — wait 3s for creds…`);
-      await new Promise(r => setTimeout(r, 3000));
-      console.log(`[${sessionCode}] Capturing creds now…`);
-      try {
-        // ★ Re-read fresh auth state from disk — the `state` variable in
-        //    this closure was captured at createSock() time, which was
-        //    before the new creds were saved. Re-read so we capture the
-        //    full creds that were just written by creds.update.
-        const freshState = await useMultiFileAuthState(sessionFolder);
-        const credsBase64 = encodeCreds(freshState.state);
-        const sessionId = buildSessionId(sessionCode, credsBase64);
-        const jid = sock.user?.id || freshState.state.creds?.me?.id;
-        const ownerName = sock.user?.name || sock.user?.notify || (jid ? jid.split(':')[0] : 'Owner');
-        console.log(`[${sessionCode}] ✓ jid=${jid}, ownerName=${ownerName}, creds size=${credsBase64.length} chars`);
-
-        if (!jid) {
-          console.error(`[${sessionCode}] ✗ No jid available — cannot send messages. Aborting.`);
-          entry.state = 'failed';
-          return;
-        }
-
-        const dpBase64 = await downloadDpBase64(sock, jid);
-        console.log(`[${sessionCode}] DP fetch: ${dpBase64 ? '✓ got' : 'null (no DP)'}`);
-
-        insertUserStmt.run({
-          phone,
-          jid: jid || null,
-          name: ownerName,
-          dp_base64: dpBase64,
-          session_code: sessionCode,
-          session_id: sessionId,
-          created_at: Date.now(),
-          last_seen: Date.now()
-        });
-
-        entry.state = 'linked';
-        entry.creds = { sessionId, dpBase64, jid };
-        console.log(`[${sessionCode}] ✓✓ Linked — session ID ready`);
-
-        // ★ Send the 3 owner messages with retry (3 attempts, 3s apart)
-        const sendWithRetry = async (msg, retries = 3) => {
-          for (let attempt = 1; attempt <= retries; attempt++) {
-            try {
-              console.log(`[${sessionCode}]    sendMessage attempt ${attempt}/${retries}…`);
-              await sock.sendMessage(jid, msg);
-              console.log(`[${sessionCode}]    ✓ delivered`);
-              return true;
-            } catch (e) {
-              console.log(`[${sessionCode}]    ✗ attempt ${attempt} failed: ${e.message}`);
-              if (attempt < retries) {
-                console.log(`[${sessionCode}]    ↻ retrying in 3s…`);
-                await new Promise(r => setTimeout(r, 3000));
-              }
-            }
-          }
-          return false;
-        };
-
-        console.log(`[${sessionCode}] → Sending owner message 1/3: "Generation session....."`);
-        await sendWithRetry({ text: 'Generation session.....' });
-        await new Promise(r => setTimeout(r, 800));
-
-        console.log(`[${sessionCode}] → Sending owner message 2/3: session ID (${sessionId.length} chars)`);
-        await sendWithRetry({ text: sessionId });
-        await new Promise(r => setTimeout(r, 800));
-
-        console.log(`[${sessionCode}] → Sending owner message 3/3: 🟢 Session Linked`);
-        await sendWithRetry({
-          text: `🟢 Session Linked\n\n🟢 Paste it as SESSION_ID during deploy or use auto enter on panel.\n🟢 Support: ${process.env.SUPPORT_URL || 'https://wa.me/message/25495314221'}`
-        });
-        console.log(`[${sessionCode}] ✓✓✓ All 3 owner messages sent to ${jid}`);
-
-        // ★ Log out so the pairing socket goes offline
-        console.log(`[${sessionCode}] → Logging out pairing socket in 3s (going offline)…`);
-        setTimeout(async () => {
-          try {
-            await sock.logout();
-            console.log(`[${sessionCode}] ✓ Logged out — pairing socket offline`);
-          } catch (e) {
-            console.log(`[${sessionCode}] ⚠ logout failed: ${e.message} — forcing end()`);
-            try { await sock.end(new Error('pairing-complete')); } catch {}
-          }
-          teardownSession(sessionCode);
-          console.log(`[${sessionCode}] ✓✓ Pairing complete. Pairing socket torn down.`);
-        }, 3000);
-      } catch (e) {
-        console.error(`[${sessionCode}] ✗ Failed to capture creds:`, e);
-        entry.state = 'failed';
-      }
+      console.log(`[${sessionCode}] 🟢 trigger via connection.update (trigger=${connection || 'notifications'})`);
+      await triggerOwnerMessages(sessionCode, phone, sessionFolder, entry, sock, 'connection.update:' + (connection || 'notifications'));
     }
 
     if (connection === 'close') {
@@ -317,7 +255,7 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
       setTimeout(async () => {
         try {
           await createSock(sessionCode, phone, sessionFolder, entry);
-          console.log(`[${sessionCode}] ✅ Reconnected — waiting for new socket to fire 'open'`);
+          console.log(`[${sessionCode}] ✅ Reconnected — waiting for new socket to fire 'open' or creds.update with me.id`);
         } catch (e) {
           console.error(`[${sessionCode}] Reconnect failed:`, e.message);
           entry.state = 'failed';
@@ -327,6 +265,103 @@ async function createSock(sessionCode, phone, sessionFolder, entry) {
   });
 
   return sock;
+}
+
+// ─── ★ Extracted: send the 3 owner messages + logout ────────────────
+//    Called from EITHER creds.update (when me.id appears) OR
+//    connection.update (when 'open' or receivedPendingNotifications fires).
+//    Guarded by entry.state so it runs exactly once.
+async function triggerOwnerMessages(sessionCode, phone, sessionFolder, entry, sock, trigger) {
+  if (entry.state === 'linked' || entry.state === 'sending') {
+    console.log(`[${sessionCode}] ↩ triggerOwnerMessages ignored — already sending/linked (state=${entry.state}, trigger=${trigger})`);
+    return;
+  }
+  entry.state = 'sending';
+  console.log(`[${sessionCode}] 🟢 send path triggered (via ${trigger}) — wait 3s for creds…`);
+  await new Promise(r => setTimeout(r, 3000));
+  console.log(`[${sessionCode}] Capturing creds now…`);
+  try {
+    const freshState = await useMultiFileAuthState(sessionFolder);
+    const credsBase64 = encodeCreds(freshState.state, sessionFolder);
+    const sessionId = buildSessionId(sessionCode, credsBase64);
+    const jid = sock.user?.id || freshState.state.creds?.me?.id;
+    const ownerName = sock.user?.name || sock.user?.notify || (jid ? jid.split(':')[0] : 'Owner');
+    console.log(`[${sessionCode}] ✓ jid=${jid}, ownerName=${ownerName}, creds size=${credsBase64.length} chars`);
+
+    if (!jid) {
+      console.error(`[${sessionCode}] ✗ No jid available — cannot send messages. Aborting.`);
+      entry.state = 'failed';
+      return;
+    }
+
+    const dpBase64 = await downloadDpBase64(sock, jid);
+    console.log(`[${sessionCode}] DP fetch: ${dpBase64 ? '✓ got' : 'null (no DP)'}`);
+
+    insertUserStmt.run({
+      phone,
+      jid: jid || null,
+      name: ownerName,
+      dp_base64: dpBase64,
+      session_code: sessionCode,
+      session_id: sessionId,
+      created_at: Date.now(),
+      last_seen: Date.now()
+    });
+
+    entry.state = 'linked';
+    entry.creds = { sessionId, dpBase64, jid };
+    console.log(`[${sessionCode}] ✓✓ Linked — session ID ready`);
+
+    // ★ Send the 3 owner messages with retry (3 attempts, 3s apart)
+    const sendWithRetry = async (msg, retries = 3) => {
+      for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+          console.log(`[${sessionCode}]    sendMessage attempt ${attempt}/${retries}…`);
+          await sock.sendMessage(jid, msg);
+          console.log(`[${sessionCode}]    ✓ delivered`);
+          return true;
+        } catch (e) {
+          console.log(`[${sessionCode}]    ✗ attempt ${attempt} failed: ${e.message}`);
+          if (attempt < retries) {
+            console.log(`[${sessionCode}]    ↻ retrying in 3s…`);
+            await new Promise(r => setTimeout(r, 3000));
+          }
+        }
+      }
+      return false;
+    };
+
+    console.log(`[${sessionCode}] → Sending owner message 1/3: "Generation session....."`);
+    await sendWithRetry({ text: 'Generation session.....' });
+    await new Promise(r => setTimeout(r, 800));
+
+    console.log(`[${sessionCode}] → Sending owner message 2/3: session ID (${sessionId.length} chars)`);
+    await sendWithRetry({ text: sessionId });
+    await new Promise(r => setTimeout(r, 800));
+
+    console.log(`[${sessionCode}] → Sending owner message 3/3: 🟢 Session Linked`);
+    await sendWithRetry({
+      text: `🟢 Session Linked\n\n🟢 Paste it as SESSION_ID during deploy or use auto enter on panel.\n🟢 Support: ${process.env.SUPPORT_URL || 'https://wa.me/message/25495314221'}`
+    });
+    console.log(`[${sessionCode}] ✓✓✓ All 3 owner messages sent to ${jid}`);
+
+    // ★ Log out so the pairing socket goes offline
+    console.log(`[${sessionCode}] → Logging out pairing socket in 3s (going offline)…`);
+    setTimeout(async () => {
+      try {
+        await sock.logout();
+        console.log(`[${sessionCode}] ✓ Logged out — pairing socket offline`);
+      } catch (e) {
+        console.log(`[${sessionCode}] ⚠ logout failed: ${e.message} — forcing end()`);
+        try { await sock.end(new Error('pairing-complete')); } catch {}
+      }
+      teardownSession(sessionCode);
+      console.log(`[${sessionCode}] ✓✓ Pairing complete. Pairing socket torn down.`);
+    }, 3000);
+  } catch (e) {
+    console.error(`[${sessionCode}] ✗ Failed to capture/send creds:`, e.message, e.stack);
+    entry.state = 'failed';
+  }
 }
 
 // ─── Start a pairing session ─────────────────────────────────────────
